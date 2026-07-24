@@ -586,6 +586,12 @@ class FCAF3DHead(Base3DDenseHead):
         gt_bboxes = gt_bboxes.to(points.device)
         n_points = len(points)
         n_boxes = len(gt_bboxes)
+        if n_boxes == 0:
+            bbox_dim = gt_bboxes.tensor.shape[-1]
+            return (
+                points.new_zeros(n_points),
+                points.new_zeros((n_points, bbox_dim)),
+                points.new_full((n_points, ), -1, dtype=torch.long))
         volumes = gt_bboxes.volume.unsqueeze(0).expand(n_points, n_boxes)
 
         # condition 1: point inside box

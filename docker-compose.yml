@@ -1,0 +1,482 @@
+name: mmdetection3d-labelcloud
+
+x-mmdet3d-env: &mmdet3d-env
+  MODEL: ${MODEL:-tr3d}
+  EXTRA_TAG: ${EXTRA_TAG:-}
+  CFG_FILE: ${CFG_FILE:-}
+  WORK_DIR: ${WORK_DIR:-}
+  PRETRAINED_MODEL: ${PRETRAINED_MODEL:-}
+  PRED_OUT_DIR: ${PRED_OUT_DIR:-}
+  SCORE_THRESH: ${SCORE_THRESH:-0.3}
+  SKIP_EXISTING: ${SKIP_EXISTING:-}
+  DEVICE: ${DEVICE:-cuda:0}
+  AUG_MODE: ${AUG_MODE:-full}
+  GT_DATABASE: ${GT_DATABASE:-auto}
+  POINT_FEATURES: ${POINT_FEATURES:-xyzrgb}
+  SAMPLE_POINTS: ${SAMPLE_POINTS:-500000}
+  SPARSE_VOXEL_SIZE: ${SPARSE_VOXEL_SIZE:-0.015}
+  MIN_BOX_DIM: ${MIN_BOX_DIM:-0.0001}
+  MIN_POINTS_IN_GT: ${MIN_POINTS_IN_GT:-1}
+  TRAIN_LR: ${TRAIN_LR:-0.0003}
+  TRAIN_LR_PEAK_RATIO: ${TRAIN_LR_PEAK_RATIO:-1.0}
+  TRAIN_REPEAT_TIMES: ${TRAIN_REPEAT_TIMES:-auto}
+  VAL_INTERVAL: ${VAL_INTERVAL:-5}
+  TRAIN_AMP: ${TRAIN_AMP:-false}
+  TRAIN_AMP_DTYPE: ${TRAIN_AMP_DTYPE:-fp16}
+  INFER_AMP: ${INFER_AMP:-false}
+  INFER_AMP_DTYPE: ${INFER_AMP_DTYPE:-fp16}
+  PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-}
+
+x-mmdet3d: &mmdet3d
+  image: mmdetection3d-labelcloud:cu116
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.labelcloud-cu116
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-pytorch/pytorch:1.13.1-cuda11.6-cudnn8-devel}
+      APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+      PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+      MMENGINE_VERSION: ${MMENGINE_VERSION:-0.10.7}
+      MMCV_VERSION: ${MMCV_VERSION:-2.1.0}
+      MMDET_VERSION: ${MMDET_VERSION:-3.2.0}
+      MINKOWSKI_ENGINE_VERSION: ${MINKOWSKI_ENGINE_VERSION:-0.5.4}
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-8.6}
+  working_dir: /workspace/mmdetection3d
+  ipc: host
+  volumes:
+    - ${LABELCLOUD_DIR:-./labelCloud}:/workspace/labelCloud:ro
+    - ${INFER_DIR:-./infer}:/workspace/infer:ro
+    - ${CHECKPOINTS_DIR:-./checkpoints}:/workspace/checkpoints:ro
+    - ${DATA_DIR:-./data}:/workspace/mmdetection3d/data
+    - ${OUTPUT_DIR:-./output}:/workspace/mmdetection3d/output
+  environment: *mmdet3d-env
+
+services:
+  pipeline:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    gpus: all
+    command:
+      - python
+      - tools/train_labelcloud_pipeline.py
+      - --labelcloud-root
+      - /workspace/labelCloud
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --train-ratio
+      - ${TRAIN_RATIO:-0.8}
+      - --val-ratio
+      - ${VAL_RATIO:-0.2}
+      - --seed
+      - ${SPLIT_SEED:-42}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --batch-size
+      - ${BATCH_SIZE:-auto}
+      - --workers
+      - ${WORKERS:-2}
+      - --num-gpus
+      - ${NUM_GPUS:-auto}
+      - --master-port
+      - ${MASTER_PORT:-18888}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --aug-mode
+      - ${AUG_MODE:-full}
+      - --point-features
+      - ${POINT_FEATURES:-xyzrgb}
+      - --sample-points
+      - ${SAMPLE_POINTS:-500000}
+      - --sparse-voxel-size
+      - ${SPARSE_VOXEL_SIZE:-0.015}
+      - --pretrained-model
+      - ${PRETRAINED_MODEL:-}
+      - --gt-database
+      - ${GT_DATABASE:-auto}
+      - --gt-database-target-elements
+      - ${GT_DATABASE_TARGET_ELEMENTS:-4000000}
+      - --gt-database-min-chunk-size
+      - ${GT_DATABASE_MIN_CHUNK_SIZE:-50000}
+      - --gt-database-max-chunk-size
+      - ${GT_DATABASE_MAX_CHUNK_SIZE:-500000}
+      - --gt-database-max-points
+      - ${GT_DATABASE_MAX_POINTS:-0}
+      - --min-box-dim
+      - ${MIN_BOX_DIM:-0.0001}
+      - --min-points-in-gt
+      - ${MIN_POINTS_IN_GT:-1}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+
+  convert:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    command:
+      - python
+      - tools/convert_labelcloud_to_custom.py
+      - --labelcloud-root
+      - /workspace/labelCloud
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --train-ratio
+      - ${TRAIN_RATIO:-0.8}
+      - --val-ratio
+      - ${VAL_RATIO:-0.2}
+      - --seed
+      - ${SPLIT_SEED:-42}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --aug-mode
+      - ${AUG_MODE:-full}
+      - --point-features
+      - ${POINT_FEATURES:-xyzrgb}
+      - --sample-points
+      - ${SAMPLE_POINTS:-500000}
+      - --sparse-voxel-size
+      - ${SPARSE_VOXEL_SIZE:-0.015}
+      - --gt-database
+      - ${GT_DATABASE:-auto}
+      - --gt-database-target-elements
+      - ${GT_DATABASE_TARGET_ELEMENTS:-4000000}
+      - --gt-database-min-chunk-size
+      - ${GT_DATABASE_MIN_CHUNK_SIZE:-50000}
+      - --gt-database-max-chunk-size
+      - ${GT_DATABASE_MAX_CHUNK_SIZE:-500000}
+      - --gt-database-max-points
+      - ${GT_DATABASE_MAX_POINTS:-0}
+      - --min-box-dim
+      - ${MIN_BOX_DIM:-0.0001}
+      - --min-points-in-gt
+      - ${MIN_POINTS_IN_GT:-1}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+
+  reconvert:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    command:
+      - python
+      - tools/convert_labelcloud_to_custom.py
+      - --labelcloud-root
+      - /workspace/labelCloud
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --train-ratio
+      - ${TRAIN_RATIO:-0.8}
+      - --val-ratio
+      - ${VAL_RATIO:-0.2}
+      - --seed
+      - ${SPLIT_SEED:-42}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --aug-mode
+      - ${AUG_MODE:-full}
+      - --point-features
+      - ${POINT_FEATURES:-xyzrgb}
+      - --sample-points
+      - ${SAMPLE_POINTS:-500000}
+      - --sparse-voxel-size
+      - ${SPARSE_VOXEL_SIZE:-0.015}
+      - --gt-database
+      - ${GT_DATABASE:-auto}
+      - --gt-database-target-elements
+      - ${GT_DATABASE_TARGET_ELEMENTS:-4000000}
+      - --gt-database-min-chunk-size
+      - ${GT_DATABASE_MIN_CHUNK_SIZE:-50000}
+      - --gt-database-max-chunk-size
+      - ${GT_DATABASE_MAX_CHUNK_SIZE:-500000}
+      - --gt-database-max-points
+      - ${GT_DATABASE_MAX_POINTS:-0}
+      - --min-box-dim
+      - ${MIN_BOX_DIM:-0.0001}
+      - --min-points-in-gt
+      - ${MIN_POINTS_IN_GT:-1}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+      - --overwrite
+
+  prepare:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    command:
+      - python
+      - tools/train_labelcloud_pipeline.py
+      - --labelcloud-root
+      - /workspace/labelCloud
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --train-ratio
+      - ${TRAIN_RATIO:-0.8}
+      - --val-ratio
+      - ${VAL_RATIO:-0.2}
+      - --seed
+      - ${SPLIT_SEED:-42}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --aug-mode
+      - ${AUG_MODE:-full}
+      - --gt-database
+      - ${GT_DATABASE:-auto}
+      - --point-features
+      - ${POINT_FEATURES:-xyzrgb}
+      - --sample-points
+      - ${SAMPLE_POINTS:-500000}
+      - --sparse-voxel-size
+      - ${SPARSE_VOXEL_SIZE:-0.015}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --gt-database-target-elements
+      - ${GT_DATABASE_TARGET_ELEMENTS:-4000000}
+      - --gt-database-min-chunk-size
+      - ${GT_DATABASE_MIN_CHUNK_SIZE:-50000}
+      - --gt-database-max-chunk-size
+      - ${GT_DATABASE_MAX_CHUNK_SIZE:-500000}
+      - --gt-database-max-points
+      - ${GT_DATABASE_MAX_POINTS:-0}
+      - --min-box-dim
+      - ${MIN_BOX_DIM:-0.0001}
+      - --min-points-in-gt
+      - ${MIN_POINTS_IN_GT:-1}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+      - --skip-train
+
+  reprepare:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    command:
+      - python
+      - tools/train_labelcloud_pipeline.py
+      - --labelcloud-root
+      - /workspace/labelCloud
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --train-ratio
+      - ${TRAIN_RATIO:-0.8}
+      - --val-ratio
+      - ${VAL_RATIO:-0.2}
+      - --seed
+      - ${SPLIT_SEED:-42}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --aug-mode
+      - ${AUG_MODE:-full}
+      - --gt-database
+      - ${GT_DATABASE:-auto}
+      - --point-features
+      - ${POINT_FEATURES:-xyzrgb}
+      - --sample-points
+      - ${SAMPLE_POINTS:-500000}
+      - --sparse-voxel-size
+      - ${SPARSE_VOXEL_SIZE:-0.015}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --gt-database-target-elements
+      - ${GT_DATABASE_TARGET_ELEMENTS:-4000000}
+      - --gt-database-min-chunk-size
+      - ${GT_DATABASE_MIN_CHUNK_SIZE:-50000}
+      - --gt-database-max-chunk-size
+      - ${GT_DATABASE_MAX_CHUNK_SIZE:-500000}
+      - --gt-database-max-points
+      - ${GT_DATABASE_MAX_POINTS:-0}
+      - --min-box-dim
+      - ${MIN_BOX_DIM:-0.0001}
+      - --min-points-in-gt
+      - ${MIN_POINTS_IN_GT:-1}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+      - --rebuild-gt-database
+      - --skip-train
+
+  train:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    gpus: all
+    environment:
+      <<: *mmdet3d-env
+      RESUME_CKPT: ${RESUME_CKPT:-auto}
+    command:
+      - python
+      - tools/train_labelcloud_pipeline.py
+      - --skip-convert
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --batch-size
+      - ${BATCH_SIZE:-auto}
+      - --workers
+      - ${WORKERS:-2}
+      - --num-gpus
+      - ${NUM_GPUS:-auto}
+      - --master-port
+      - ${MASTER_PORT:-18888}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+      - --pretrained-model
+      - ${PRETRAINED_MODEL:-}
+
+  retrain:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    gpus: all
+    environment:
+      <<: *mmdet3d-env
+      RESUME_CKPT: ""
+    command:
+      - python
+      - tools/train_labelcloud_pipeline.py
+      - --skip-convert
+      - --reset-output
+      - --out-dir
+      - ${OUT_DIR:-data/labelcloud}
+      - --model
+      - ${MODEL:-tr3d}
+      - --extra-tag
+      - ${EXTRA_TAG:-}
+      - --batch-size
+      - ${BATCH_SIZE:-auto}
+      - --workers
+      - ${WORKERS:-2}
+      - --num-gpus
+      - ${NUM_GPUS:-auto}
+      - --master-port
+      - ${MASTER_PORT:-18888}
+      - --epochs
+      - ${EPOCHS:-80}
+      - --train-repeat-times
+      - ${TRAIN_REPEAT_TIMES:-auto}
+      - --val-interval
+      - ${VAL_INTERVAL:-5}
+      - --train-lr
+      - ${TRAIN_LR:-0.0003}
+      - --train-lr-peak-ratio
+      - ${TRAIN_LR_PEAK_RATIO:-1.0}
+      - --pretrained-model
+      - ${PRETRAINED_MODEL:-}
+
+  infer:
+    <<: *mmdet3d
+    profiles:
+      - jobs
+    gpus: all
+    environment:
+      MODEL: ${MODEL:-tr3d}
+      PRED_OUT_DIR: ${PRED_OUT_DIR:-}
+      SCORE_THRESH: ${SCORE_THRESH:-0.3}
+      SKIP_EXISTING: ${SKIP_EXISTING:-}
+      DEVICE: ${DEVICE:-cuda:0}
+      INFER_AMP: ${INFER_AMP:-false}
+      INFER_AMP_DTYPE: ${INFER_AMP_DTYPE:-fp16}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-}
+      INFER_CFG_FILE: ${INFER_CFG_FILE:-}
+      INFER_CKPT: ${INFER_CKPT:-}
+    command:
+      - python
+      - tools/infer_labelcloud.py
+      - --model
+      - ${MODEL:-tr3d}
+      - --cfg-file
+      - ${INFER_CFG_FILE:-}
+      - --input-dir
+      - ${INPUT_DIR:-/workspace/infer}
+      - --output-dir
+      - ${PRED_OUT_DIR:-}
+      - --score-thresh
+      - ${SCORE_THRESH:-0.3}
+      - --device
+      - ${DEVICE:-cuda:0}
+
+  infer-http:
+    <<: *mmdet3d
+    gpus: all
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8011}:${HTTP_PORT:-8011}"
+    environment:
+      MODEL: ${MODEL:-tr3d}
+      DEVICE: ${DEVICE:-cuda:0}
+      INFER_AMP: ${INFER_AMP:-false}
+      INFER_AMP_DTYPE: ${INFER_AMP_DTYPE:-fp16}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-}
+      INFER_CFG_FILE: ${INFER_CFG_FILE:-}
+      INFER_CKPT: ${INFER_CKPT:-}
+      HTTP_HOST: ${HTTP_HOST:-0.0.0.0}
+      HTTP_PORT: ${HTTP_PORT:-8011}
+      HTTP_AUTH_TOKEN: ${HTTP_AUTH_TOKEN:-}
+      HTTP_CROP: ${HTTP_CROP:-false}
+    command:
+      - python
+      - tools/http_infer_labelcloud.py
+      - --host
+      - ${HTTP_HOST:-0.0.0.0}
+      - --port
+      - ${HTTP_PORT:-8011}
+
+  shell:
+    <<: *mmdet3d
+    profiles:
+      - tools
+    command: /bin/bash

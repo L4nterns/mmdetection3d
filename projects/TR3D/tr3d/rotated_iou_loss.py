@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -9,6 +10,12 @@ from torch import nn as nn
 
 from mmdet3d.models import rotated_iou_3d_loss
 from mmdet3d.registry import MODELS
+
+
+def autocast_disabled_for(tensor: Tensor):
+    if tensor.is_cuda:
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
 
 
 def diff_diou_rotated_3d(box3d1: Tensor, box3d2: Tensor) -> Tensor:
@@ -138,12 +145,13 @@ class TR3DRotatedIoU3DLoss(nn.Module):
             reduction_override if reduction_override else self.reduction)
         if weight is not None and weight.dim() > 1:
             weight = weight.mean(-1)
-        loss = self.loss_weight * self.loss(
-            pred,
-            target,
-            weight,
-            reduction=reduction,
-            avg_factor=avg_factor,
-            **kwargs)
+        with autocast_disabled_for(pred):
+            loss = self.loss_weight * self.loss(
+                pred.float(),
+                target.float(),
+                None if weight is None else weight.float(),
+                reduction=reduction,
+                avg_factor=avg_factor,
+                **kwargs)
 
         return loss

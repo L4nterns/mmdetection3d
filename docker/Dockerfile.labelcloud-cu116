@@ -1,0 +1,84 @@
+ARG BASE_IMAGE=pytorch/pytorch:1.13.1-cuda11.6-cudnn8-devel
+FROM ${BASE_IMAGE}
+
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG MMENGINE_VERSION=0.10.7
+ARG MMCV_VERSION=2.1.0
+ARG MMDET_VERSION=3.2.0
+ARG MINKOWSKI_ENGINE_VERSION=0.5.4
+ARG TORCH_CUDA_ARCH_LIST=8.6
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV FORCE_CUDA=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV MAX_JOBS=4
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+RUN if [ -f /etc/apt/sources.list ]; then \
+      sed -i "s@http://archive.ubuntu.com/ubuntu/@https://${APT_MIRROR}/ubuntu/@g; s@http://security.ubuntu.com/ubuntu/@https://${APT_MIRROR}/ubuntu/@g" /etc/apt/sources.list; \
+    fi
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libopenblas-dev \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip config set global.index-url "${PIP_INDEX_URL}" \
+    && python -m pip config set global.trusted-host "${PIP_TRUSTED_HOST}" \
+    && python -m pip install --upgrade pip setuptools wheel openmim
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    mim install "mmengine==${MMENGINE_VERSION}" "mmcv==${MMCV_VERSION}" "mmdet==${MMDET_VERSION}"
+
+WORKDIR /workspace/mmdetection3d
+
+COPY requirements /workspace/mmdetection3d/requirements
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install "numpy<2" -r requirements/runtime.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install -r requirements/http.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip download --no-build-isolation --no-deps --no-binary=:all: \
+    -d /tmp "MinkowskiEngine==${MINKOWSKI_ENGINE_VERSION}" \
+    && tar -xzf "/tmp/MinkowskiEngine-${MINKOWSKI_ENGINE_VERSION}.tar.gz" -C /tmp \
+    && cd "/tmp/MinkowskiEngine-${MINKOWSKI_ENGINE_VERSION}" \
+    && python -c "from pathlib import Path; p = Path('src/spmm.cu'); text = p.read_text(); p.write_text('#include <ATen/ATen.h>\\n' + text if '#include <ATen/ATen.h>' not in text else text)" \
+    && python -c "from pathlib import Path; p = Path('pybind/extern.hpp'); text = p.read_text(); p.write_text('#include <pybind11/operators.h>\\n' + text if '#include <pybind11/operators.h>' not in text else text)" \
+    && python -c "from pathlib import Path; p = Path('pybind/extern.hpp'); text = p.read_text(); p.write_text(text.replace('.def(py::self == py::self);', '.def(\"__eq__\", [](const minkowski::CoordinateMapKey &a, const minkowski::CoordinateMapKey &b) { return a == b; });'))" \
+    && python setup.py install --force_cuda --blas=openblas \
+    && python -c "from pathlib import Path; roots = list(Path('/opt/conda/lib/python3.10/site-packages').glob('**/MinkowskiEngine')); assert roots, 'MinkowskiEngine package not found'; repl = {'from collections import Sequence, namedtuple': 'from collections.abc import Sequence\\nfrom collections import namedtuple', 'from collections import Sequence': 'from collections.abc import Sequence', 'from collections import Iterable': 'from collections.abc import Iterable', 'from collections import Mapping': 'from collections.abc import Mapping'}; [p.write_text(ns) for root in roots for p in root.rglob('*.py') if (ns := __import__('functools').reduce(lambda text, item: text.replace(item[0], item[1]), repl.items(), p.read_text())) != p.read_text()]" \
+    && cd / \
+    && rm -rf "/tmp/MinkowskiEngine-${MINKOWSKI_ENGINE_VERSION}" "/tmp/MinkowskiEngine-${MINKOWSKI_ENGINE_VERSION}.tar.gz" \
+    && python -c "import MinkowskiEngine as ME; print('MinkowskiEngine', getattr(ME, '__version__', 'unknown'))"
+
+COPY README.md /workspace/mmdetection3d/README.md
+COPY setup.py /workspace/mmdetection3d/setup.py
+COPY mmdet3d /workspace/mmdetection3d/mmdet3d
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python setup.py develop --no-deps
+
+COPY . /workspace/mmdetection3d
+
+CMD ["/bin/bash"]

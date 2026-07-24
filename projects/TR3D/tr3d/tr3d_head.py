@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 # Adapted from https://github.com/SamsungLabs/tr3d/blob/master/mmdet3d/models/dense_heads/tr3d_head.py # noqa
+from contextlib import nullcontext
 from typing import List, Optional, Tuple
 
 try:
@@ -20,6 +21,12 @@ from mmdet3d.models import Base3DDenseHead
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import BaseInstance3DBoxes
 from mmdet3d.utils import InstanceList, OptInstanceList
+
+
+def autocast_disabled_for(tensor: Tensor):
+    if tensor.is_cuda:
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
 
 
 @MODELS.register_module()
@@ -102,10 +109,12 @@ class TR3DHead(Base3DDenseHead):
             tuple[Tensor]: Per level head predictions.
         """
         reg_final = self.conv_reg(x).features
-        reg_distance = torch.exp(reg_final[:, 3:6])
-        reg_angle = reg_final[:, 6:]
-        bbox_pred = torch.cat((reg_final[:, :3], reg_distance, reg_angle),
-                              dim=1)
+        with autocast_disabled_for(reg_final):
+            reg_final = reg_final.float()
+            reg_distance = torch.exp(reg_final[:, 3:6])
+            reg_angle = reg_final[:, 6:]
+            bbox_pred = torch.cat(
+                (reg_final[:, :3], reg_distance, reg_angle), dim=1)
         cls_pred = self.conv_cls(x).features
 
         bbox_preds, cls_preds, points = [], [], []
@@ -160,7 +169,8 @@ class TR3DHead(Base3DDenseHead):
         points = torch.cat(points)
 
         # cls loss
-        cls_loss = self.cls_loss(cls_preds, cls_targets)
+        with autocast_disabled_for(cls_preds):
+            cls_loss = self.cls_loss(cls_preds.float(), cls_targets)
 
         # bbox loss
         pos_mask = cls_targets < num_classes
@@ -169,12 +179,14 @@ class TR3DHead(Base3DDenseHead):
             pos_points = points[pos_mask]
             pos_bbox_preds = bbox_preds[pos_mask]
             pos_bbox_targets = bbox_targets[pos_mask]
-            bbox_loss = self.bbox_loss(
-                self._bbox_to_loss(
-                    self._bbox_pred_to_bbox(pos_points, pos_bbox_preds)),
-                self._bbox_to_loss(pos_bbox_targets))
+            with autocast_disabled_for(pos_bbox_preds):
+                bbox_loss = self.bbox_loss(
+                    self._bbox_to_loss(
+                        self._bbox_pred_to_bbox(pos_points.float(),
+                                                pos_bbox_preds.float())),
+                    self._bbox_to_loss(pos_bbox_targets.float()))
         else:
-            bbox_loss = pos_bbox_preds
+            bbox_loss = bbox_preds.sum()[None] * 0
         return bbox_loss, cls_loss, pos_mask
 
     def loss_by_feat(self,
@@ -219,10 +231,16 @@ class TR3DHead(Base3DDenseHead):
                 bbox_losses.append(bbox_loss)
             cls_losses.append(cls_loss)
             pos_masks.append(pos_mask)
+        cls_losses = torch.cat(cls_losses)
+        pos_masks = torch.cat(pos_masks)
+        num_pos = torch.sum(pos_masks).clamp(min=1)
+        if bbox_losses:
+            bbox_loss = torch.mean(torch.cat(bbox_losses))
+        else:
+            bbox_loss = cls_losses.sum() * 0
         return dict(
-            bbox_loss=torch.mean(torch.cat(bbox_losses)),
-            cls_loss=torch.sum(torch.cat(cls_losses)) /
-            torch.sum(torch.cat(pos_masks)))
+            bbox_loss=bbox_loss,
+            cls_loss=torch.sum(cls_losses) / num_pos)
 
     def _predict_by_feat_single(self, bbox_preds: List[Tensor],
                                 cls_preds: List[Tensor], points: List[Tensor],
@@ -240,7 +258,7 @@ class TR3DHead(Base3DDenseHead):
         Returns:
             InstanceData: Predicted bounding boxes, scores and labels.
         """
-        scores = torch.cat(cls_preds).sigmoid()
+        scores = torch.cat(cls_preds).float().sigmoid()
         bbox_preds = torch.cat(bbox_preds)
         points = torch.cat(points)
         max_scores, _ = scores.max(dim=1)
@@ -251,7 +269,9 @@ class TR3DHead(Base3DDenseHead):
             scores = scores[ids]
             points = points[ids]
 
-        bboxes = self._bbox_pred_to_bbox(points, bbox_preds)
+        with autocast_disabled_for(bbox_preds):
+            bboxes = self._bbox_pred_to_bbox(points.float(),
+                                             bbox_preds.float())
         bboxes, scores, labels = self._single_scene_multiclass_nms(
             bboxes, scores, input_meta)
 
@@ -382,36 +402,58 @@ class TR3DHead(Base3DDenseHead):
                 gt_labels.new_full((n_points,), num_classes)
 
         boxes = torch.cat((gt_bboxes.gravity_center, gt_bboxes.tensor[:, 3:]),
-                          dim=1)
-        boxes = boxes.to(points.device).expand(n_points, n_boxes, 7)
-        points = points.unsqueeze(1).expand(n_points, n_boxes, 3)
+                          dim=1).to(points.device)
 
         # condition 1: fix level for label
         label2level = gt_labels.new_tensor(self.label2level)
-        label_levels = label2level[gt_labels].unsqueeze(0).expand(
-            n_points, n_boxes)
-        point_levels = torch.unsqueeze(levels, 1).expand(n_points, n_boxes)
-        level_condition = label_levels == point_levels
+        label_levels = label2level[gt_labels]
 
         # condition 2: keep topk location per box by center distance
-        center = boxes[..., :3]
-        center_distances = torch.sum(torch.pow(center - points, 2), dim=-1)
-        center_distances = torch.where(level_condition, center_distances,
-                                       float_max)
+        center = boxes[:, :3]
+        chunk_size = min(n_points, 50000)
+        topk = min(self.pts_center_threshold + 1, n_points)
+        topk_distances = points.new_full((topk, n_boxes), float_max)
+        for start in range(0, n_points, chunk_size):
+            end = min(start + chunk_size, n_points)
+            chunk_points = points[start:end]
+            chunk_levels = levels[start:end]
+            center_distances = torch.sum(
+                torch.pow(center.unsqueeze(0) - chunk_points.unsqueeze(1), 2),
+                dim=-1)
+            level_condition = chunk_levels.unsqueeze(1) == label_levels.unsqueeze(0)
+            center_distances = torch.where(level_condition, center_distances,
+                                           float_max)
+            topk_distances = torch.topk(
+                torch.cat((topk_distances, center_distances), dim=0),
+                topk,
+                largest=False,
+                dim=0).values
         topk_distances = torch.topk(
-            center_distances,
-            min(self.pts_center_threshold + 1, len(center_distances)),
+            topk_distances,
+            topk,
             largest=False,
             dim=0).values[-1]
-        topk_condition = center_distances < topk_distances.unsqueeze(0)
 
         # condition 3: min center distance to box per point
-        center_distances = torch.where(topk_condition, center_distances,
-                                       float_max)
-        min_values, min_ids = center_distances.min(dim=1)
+        min_values = points.new_full((n_points,), float_max)
+        min_ids = gt_labels.new_zeros((n_points,))
+        for start in range(0, n_points, chunk_size):
+            end = min(start + chunk_size, n_points)
+            chunk_points = points[start:end]
+            chunk_levels = levels[start:end]
+            center_distances = torch.sum(
+                torch.pow(center.unsqueeze(0) - chunk_points.unsqueeze(1), 2),
+                dim=-1)
+            level_condition = chunk_levels.unsqueeze(1) == label_levels.unsqueeze(0)
+            center_distances = torch.where(level_condition, center_distances,
+                                           float_max)
+            topk_condition = center_distances < topk_distances.unsqueeze(0)
+            center_distances = torch.where(topk_condition, center_distances,
+                                           float_max)
+            min_values[start:end], min_ids[start:end] = center_distances.min(dim=1)
         min_inds = torch.where(min_values < float_max, min_ids, -1)
 
-        bbox_targets = boxes[0][min_inds]
+        bbox_targets = boxes[min_inds]
         if not gt_bboxes.with_yaw:
             bbox_targets = bbox_targets[:, :-1]
         cls_targets = torch.where(min_inds >= 0, gt_labels[min_inds],

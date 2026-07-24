@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -9,6 +10,12 @@ from torch import nn as nn
 from mmdet3d.models import axis_aligned_iou_loss
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import AxisAlignedBboxOverlaps3D
+
+
+def autocast_disabled_for(tensor: Tensor):
+    if tensor.is_cuda:
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
 
 
 @weighted_loss
@@ -109,9 +116,10 @@ class TR3DAxisAlignedIoULoss(nn.Module):
         if (weight is not None) and (not torch.any(weight > 0)) and (
                 reduction != 'none'):
             return (pred * weight).sum()
-        return self.loss(
-            pred,
-            target,
-            weight=weight,
-            avg_factor=avg_factor,
-            reduction=reduction) * self.loss_weight
+        with autocast_disabled_for(pred):
+            return self.loss(
+                pred.float(),
+                target.float(),
+                weight=None if weight is None else weight.float(),
+                avg_factor=avg_factor,
+                reduction=reduction) * self.loss_weight

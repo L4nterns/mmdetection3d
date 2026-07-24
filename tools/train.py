@@ -4,6 +4,7 @@ import logging
 import os
 import os.path as osp
 
+import torch
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
@@ -21,6 +22,11 @@ def parse_args():
         action='store_true',
         default=False,
         help='enable automatic-mixed-precision training')
+    parser.add_argument(
+        '--amp-dtype',
+        choices=['fp16', 'bf16'],
+        default='fp16',
+        help='AMP autocast dtype for training.')
     parser.add_argument(
         '--sync_bn',
         choices=['none', 'torch', 'mmcv'],
@@ -102,6 +108,19 @@ def main():
                 '`--amp` is only supported when the optimizer wrapper type is '
                 f'`OptimWrapper` but got {optim_wrapper}.')
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
+        if args.amp_dtype == 'bf16':
+            if not hasattr(torch, 'bfloat16'):
+                raise RuntimeError('当前 PyTorch 不支持 bfloat16 AMP 训练。')
+            if not torch.cuda.is_available():
+                raise RuntimeError('bfloat16 AMP 训练需要可用的 CUDA/GPU。')
+            if not hasattr(torch.cuda, 'is_bf16_supported'):
+                raise RuntimeError('当前 PyTorch 无法检测 bfloat16 CUDA 支持。')
+            if not torch.cuda.is_bf16_supported():
+                raise RuntimeError('当前 CUDA/GPU 不支持 bfloat16 AMP 训练。')
+            cfg.optim_wrapper.dtype = 'bfloat16'
+            cfg.optim_wrapper.loss_scale = dict(enabled=False)
+        else:
+            cfg.optim_wrapper.dtype = 'float16'
             cfg.optim_wrapper.loss_scale = 'dynamic'
 
     # convert BatchNorm layers

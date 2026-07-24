@@ -111,6 +111,13 @@ data
 .idea
 
 # custom
+labelCloud/
+infer/
+checkpoints/
+output/
+tools/labelcloud_host/.venv/
+.uv-cache/
+.history/
 *.pkl
 *.pkl.json
 *.log.json
